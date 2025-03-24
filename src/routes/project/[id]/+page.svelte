@@ -1,7 +1,7 @@
 <script lang="ts">
     import { supabase } from '$lib/supabase';
     import type { PageData } from './$types';
-    import type { Project, Note, LlmSource, Topic } from '$lib/types';
+    import type { Project, Note, LlmSource, Topic, Tag } from '$lib/types';
     
     export let data: PageData;
     
@@ -9,10 +9,12 @@
     let notes = data.notes;
     let llmSources = data.llmSources;
     let topics = data.topics;
+    let tags = data.tags
     
     let error: string | null = null;
     let searchQuery = '';
     let filteredNotes = notes;
+    let selectedTags: string[] = [];
     
     // New note form state
     let newNote = {
@@ -21,7 +23,89 @@
       topic_id: topics.length > 0 ? topics[0].id : ''
     };
     let creating = false;
+    let tagInput = ''; // Add this line
+let selectedTagIds: string[] = []; // Add this line
     
+// Tag handling functions
+async function addTag() {
+  if (!tagInput.trim()) return;
+  
+  // Check if tag already exists
+  let existingTag = tags.find(t => t.name.toLowerCase() === tagInput.trim().toLowerCase());
+  
+  if (existingTag) {
+    // Use existing tag if not already selected
+    if (!selectedTagIds.includes(existingTag.id)) {
+      selectedTagIds = [...selectedTagIds, existingTag.id];
+    }
+  } else {
+    // Create new tag
+    try {
+      const { data: newTag, error: tagError } = await supabase
+        .from('tags')
+        .insert([{ name: tagInput.trim() }])
+        .select();
+        
+      if (tagError) throw tagError;
+      
+      if (newTag && newTag.length > 0) {
+        tags = [...tags, newTag[0]];
+        selectedTagIds = [...selectedTagIds, newTag[0].id];
+      }
+    } catch (e) {
+      console.error('Error creating tag:', e);
+      error = 'Could not create tag. Please try again.';
+      return;
+    }
+  }
+  
+  // Clear tag input
+  tagInput = '';
+}
+
+function removeTag(tagId: string) {
+  selectedTagIds = selectedTagIds.filter(id => id !== tagId);
+}
+
+// Filter notes by tag
+function filterByTag(tagId: string) {
+  if (selectedTags.includes(tagId)) {
+    // Remove tag from filter
+    selectedTags = selectedTags.filter(id => id !== tagId);
+  } else {
+    // Add tag to filter
+    selectedTags = [...selectedTags, tagId];
+  }
+  
+  // Apply filters
+  applyFilters();
+}
+
+function applyFilters() {
+  // Start with search query filter
+  let filtered = notes;
+  
+  if (searchQuery.trim()) {
+    const query = searchQuery.toLowerCase().trim();
+    filtered = filtered.filter(note => 
+      note.content.toLowerCase().includes(query) ||
+      note.llm_sources?.name?.toLowerCase().includes(query) ||
+      note.topics?.name?.toLowerCase().includes(query)
+    );
+  }
+  
+  // Apply tag filters if any are selected
+if (selectedTags.length > 0) {
+  filtered = filtered.filter(note => {
+    if (!note.tags) return false;
+    // Note passes filter if it has at least one of the selected tags
+    return note.tags.some((tag: Tag) => selectedTags.includes(tag.id));
+  });
+}
+  
+  filteredNotes = filtered;
+}
+
     // Search functionality
     function searchNotes() {
       if (!searchQuery.trim()) {
@@ -37,57 +121,80 @@
       );
     }
     
-    // Create new note
-    async function createNote() {
-      if (!newNote.content.trim() || !newNote.llm_source_id || !newNote.topic_id) {
-        error = 'Please fill in all required fields';
-        return;
+    // Create new note with tags
+async function createNote() {
+  if (!newNote.content.trim() || !newNote.llm_source_id || !newNote.topic_id) {
+    error = 'Please fill in all required fields';
+    return;
+  }
+  
+  try {
+    creating = true;
+    error = null;
+    
+    // Insert note
+    const { data: createdNote, error: insertError } = await supabase
+      .from('notes')
+      .insert([{
+        project_id: project.id,
+        content: newNote.content,
+        llm_source_id: newNote.llm_source_id,
+        topic_id: newNote.topic_id
+      }])
+      .select(`
+        *,
+        llm_sources (id, name),
+        topics (id, name)
+      `);
+    
+    if (insertError) throw insertError;
+    
+    if (createdNote && createdNote.length > 0) {
+      // Add tags to note
+      if (selectedTagIds.length > 0) {
+        const noteTagsToInsert = selectedTagIds.map(tagId => ({
+          note_id: createdNote[0].id,
+          tag_id: tagId
+        }));
+        
+        const { error: tagLinkError } = await supabase
+          .from('note_tags')
+          .insert(noteTagsToInsert);
+          
+        if (tagLinkError) throw tagLinkError;
+        
+        // Add tags to the created note object for display
+        createdNote[0].tags = tags.filter(tag => selectedTagIds.includes(tag.id));
+      } else {
+        createdNote[0].tags = [];
       }
       
-      try {
-        creating = true;
-        error = null;
-        
-        const { data: createdNote, error: insertError } = await supabase
-          .from('notes')
-          .insert([{
-            project_id: project.id,
-            content: newNote.content,
-            llm_source_id: newNote.llm_source_id,
-            topic_id: newNote.topic_id
-          }])
-          .select(`
-            *,
-            llm_sources (id, name),
-            topics (id, name)
-          `);
-        
-        if (insertError) throw insertError;
-        
-        if (createdNote && createdNote.length > 0) {
-          notes = [createdNote[0], ...notes];
-          filteredNotes = [createdNote[0], ...filteredNotes];
-          
-          // Reset form
-          newNote.content = '';
-          newNote.llm_source_id = llmSources.length > 0 ? llmSources[0].id : '';
-          newNote.topic_id = topics.length > 0 ? topics[0].id : '';
-        }
-      } catch (e) {
-        console.error('Error creating note:', e);
-        error = 'Could not create note. Please try again.';
-      } finally {
-        creating = false;
-      }
+      notes = [createdNote[0], ...notes];
+      filteredNotes = [createdNote[0], ...filteredNotes];
+      
+      // Reset form
+      newNote.content = '';
+      newNote.llm_source_id = llmSources.length > 0 ? llmSources[0].id : '';
+      newNote.topic_id = topics.length > 0 ? topics[0].id : '';
+      selectedTagIds = [];
     }
+  } catch (e) {
+    console.error('Error creating note:', e);
+    error = 'Could not create note. Please try again.';
+  } finally {
+    creating = false;
+  }
+}
     
     function formatDate(dateString: string): string {
       return new Date(dateString).toLocaleDateString();
     }
   
     $: {
-      searchNotes();
-    }
+  if (searchQuery !== undefined) {
+    applyFilters();
+  }
+}
   </script>
   
   <div class="min-h-screen bg-gray-100">
@@ -180,6 +287,51 @@
             </div>
           </div>
           
+          <div>
+            <label for="tags" class="block text-sm font-medium text-gray-700">Tags</label>
+            <div class="mt-1 flex rounded-md shadow-sm">
+              <input
+                bind:value={tagInput}
+                type="text"
+                id="tags"
+                class="flex-1 min-w-0 block rounded-none rounded-l-md border-gray-300 p-2 border focus:border-indigo-500 focus:ring-indigo-500"
+                placeholder="Add tags..."
+                on:keyup={e => e.key === 'Enter' && addTag()}
+              />
+              <button
+                type="button"
+                on:click={addTag}
+                class="inline-flex items-center px-3 rounded-r-md border border-l-0 border-gray-300 bg-gray-50 text-gray-500 text-sm"
+              >
+                Add
+              </button>
+            </div>
+            
+            <!-- Selected Tags -->
+            {#if selectedTagIds.length > 0}
+              <div class="mt-2 flex flex-wrap gap-2">
+                {#each selectedTagIds as tagId}
+                  {#if tags.find(t => t.id === tagId)}
+                    {@const tag = tags.find(t => t.id === tagId)}
+                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
+                      {tag.name}
+                      <button 
+                        type="button" 
+                        class="ml-1.5 inline-flex items-center justify-center h-4 w-4 rounded-full text-indigo-400 hover:bg-indigo-200 hover:text-indigo-500 focus:outline-none focus:bg-indigo-500 focus:text-white"
+                        on:click={() => removeTag(tagId)}
+                      >
+                        <span class="sr-only">Remove tag</span>
+                        <svg class="h-2 w-2" stroke="currentColor" fill="none" viewBox="0 0 8 8">
+                          <path stroke-linecap="round" stroke-width="1.5" d="M1 1l6 6m0-6L1 7" />
+                        </svg>
+                      </button>
+                    </span>
+                  {/if}
+                {/each}
+              </div>
+            {/if}
+          </div>
+
           <button
             type="submit"
             disabled={creating}
@@ -190,6 +342,30 @@
         </form>
       </div>
       
+<!-- Tag filtering UI -->
+<div class="bg-white shadow sm:rounded-lg mb-6 p-4">
+    <h3 class="text-sm font-medium text-gray-700 mb-2">Filter by Tag</h3>
+    <div class="flex flex-wrap gap-2">
+      {#each tags as tag}
+        <button
+          type="button"
+          class="inline-flex items-center px-2.5 py-1.5 border rounded-full text-xs font-medium 
+          {selectedTags.includes(tag.id) 
+            ? 'bg-indigo-100 text-indigo-800 border-indigo-300' 
+            : 'bg-gray-100 text-gray-800 border-gray-300 hover:bg-gray-200'}"
+          on:click={() => filterByTag(tag.id)}
+        >
+          {tag.name}
+          {#if selectedTags.includes(tag.id)}
+            <svg class="ml-1.5 h-2 w-2" stroke="currentColor" fill="none" viewBox="0 0 8 8">
+              <path stroke-linecap="round" stroke-width="1.5" d="M1 1l6 6m0-6L1 7" />
+            </svg>
+          {/if}
+        </button>
+      {/each}
+    </div>
+  </div>
+
       <!-- Notes List -->
       <div class="bg-white shadow sm:rounded-lg">
         <div class="px-4 py-5 sm:px-6 flex justify-between items-center">
@@ -219,6 +395,17 @@
                   </p>
                 </div>
                 
+<!-- Add this section for tags -->
+{#if note.tags && note.tags.length > 0}
+  <div class="flex flex-wrap gap-1 mb-2">
+    {#each note.tags as tag}
+      <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
+        {tag.name}
+      </span>
+    {/each}
+  </div>
+{/if}
+
                 <div class="prose max-w-none">
                   <p class="text-gray-900 whitespace-pre-wrap">{note.content}</p>
                 </div>

@@ -55,10 +55,42 @@ export const load: PageServerLoad = async ({ params }) => {
     throw error(500, 'Failed to load topics');
   }
   
+  // Load all tags
+  const { data: tags, error: tagsError } = await supabase
+    .from('tags')
+    .select('*')
+    .order('name');
+  
+  if (tagsError) {
+    console.error('Error fetching tags:', tagsError);
+    throw error(500, 'Failed to load tags');
+  }
+  
+  // Load note_tags relationships
+  const { data: noteTags, error: noteTagsError } = await supabase
+    .from('note_tags')
+    .select('*')
+    .in('note_id', notes.map(note => note.id));
+  
+  if (noteTagsError) {
+    console.error('Error fetching note_tags:', noteTagsError);
+    throw error(500, 'Failed to load note tags');
+  }
+  
+  // Attach tags to notes
+  for (const note of notes) {
+    const noteTagIds = noteTags
+      .filter(nt => nt.note_id === note.id)
+      .map(nt => nt.tag_id);
+    
+    note.tags = tags.filter(tag => noteTagIds.includes(tag.id));
+  }
+  
   return {
     project,
     notes,
     llmSources,
-    topics
+    topics,
+    tags
   };
 };

@@ -16,6 +16,7 @@ export interface Project {
     topic_id: string;
     created_at: string;
     updated_at: string;
+    tags?: Tag[]; // Add this line if not already present
   }
   
   export interface LlmSource {
